@@ -1,0 +1,6 @@
+ __pycache__/
+  *.pyc
+  *.spe
+  *.csv
+  *_Zihad/
+  .spyproject/
