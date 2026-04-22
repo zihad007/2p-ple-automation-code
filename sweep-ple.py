@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 sweep-ple.py
-11th–16th Prompts: Merges sweep-alignment.py with lightfield-ple.py.
+11th–19th Prompts: Merges sweep-alignment.py with lightfield-ple.py.
 
 At the start:
   - Opens LightField remotely (no GUI)
@@ -40,6 +40,7 @@ if SCRIPT_DIR not in sys.path:
 sys.path.append(LIGHTFIELD_DIR)
 sys.path.append(ADDIN_VIEWS_DIR)
 
+
 clr.AddReference("PrincetonInstruments.LightField.AutomationV4")
 clr.AddReference("PrincetonInstruments.LightFieldAddInSupportServices")
 clr.AddReference("PrincetonInstruments.LightFieldViewV4")
@@ -59,12 +60,12 @@ from PrincetonInstruments.LightField.AddIns import (
 # ---------------------------------------------------------------------------
 import csv
 import serial
-import threading
 import time
 from datetime import datetime
 
 import pm100d
 import k10cr2
+import sc30
 from power_convergence import converge_power, TOLERANCE_MW, SETTLE_S
 
 # ---------------------------------------------------------------------------
@@ -165,28 +166,6 @@ def lf_acquire(experiment, wl, folder_path):
 
 
 # ---------------------------------------------------------------------------
-# Timed input helper
-# ---------------------------------------------------------------------------
-
-def timed_input(prompt, timeout, default):
-    """Show *prompt*, return user input.  If no response within *timeout* seconds,
-    print a notice and return *default*."""
-    result = [default]
-
-    def _read():
-        try:
-            result[0] = input(prompt)
-        except Exception:
-            pass
-
-    t = threading.Thread(target=_read, daemon=True)
-    t.start()
-    t.join(timeout)
-    if t.is_alive():
-        print(f"\nNo response in {timeout} s — defaulting to '{default}'.")
-    return result[0]
-
-
 # ---------------------------------------------------------------------------
 # Main sweep
 # ---------------------------------------------------------------------------
@@ -196,6 +175,7 @@ def run_sweep(
     experiment, int_time_s, folder_path,
     wavelengths_nm,
     target_mw,
+    sc30_ser,
     tolerance_mw=TOLERANCE_MW,
     angle_min=86.0,
     angle_max=100.0,
@@ -296,25 +276,35 @@ def run_sweep(
         hwp_deg = k10cr2.get_angle(hwp_stage)
         print(f"  Power converged : {p_mw:.3f} mW | GLP {glp_deg:.4f} deg | HWP {hwp_deg:.4f} deg")
 
-        # -- Acquire LightField frame --
-        print(f"  Acquiring LightField frame...")
-        saved_path, base_name = lf_acquire(experiment, wl, folder_path)
-        print(f"  LightField saved: {saved_path}")
+        # -- Wait for power to settle, then log --
+        print("  Waiting 4 s for power to settle after convergence...")
+        time.sleep(4)
+        p_mw = pm100d.get_power(instr) * 1e3
+        print(f"  Power at acquisition : {p_mw:.3f} mW")
 
-        # -- Log entry --
         log.append({
             "wavelength_nm":    wl,
             "power_mw":         round(p_mw, 4),
             "integration_time_s": int_time_s,
             "glp_deg":          round(glp_deg, 4),
             "hwp_deg":          round(hwp_deg, 4),
-            "lf_file":          saved_path,
+            "lf_file":          "",   # filled in below
         })
         print(f"  LOGGED: {wl} nm | {p_mw:.3f} mW | {int_time_s} s integration")
 
-        # -- Close shutter --
+        # -- Open beam shutter, acquire LightField frame, close both shutters --
+        print("  Opening beam shutter (SC30)...")
+        sc30.open_shutter(sc30_ser)
+
+        print("  Acquiring LightField frame...")
+        saved_path, base_name = lf_acquire(experiment, wl, folder_path)
+        print(f"  LightField saved: {saved_path}")
+
+        sc30.close_shutter(sc30_ser)
         ack = set_shutter(ser, False)
-        print(f"  Shutter closed: {ack!r}")
+        print(f"  Beam shutter and laser shutter closed: {ack!r}")
+
+        log[-1]["lf_file"] = saved_path
 
     return log
 
@@ -335,6 +325,46 @@ def save_log(log, out_dir):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    # ------------------------------------------------------------------
+    # 0. Pre-run checklist
+    # ------------------------------------------------------------------
+    print("=" * 60)
+    print("Make sure-")
+    print("  The 900 short-pass dichroic beamsplitter is in position")
+    print("  The 650 short-pass filter is in the collection path")
+    print("  The sensor temperature has reached -70 degrees in the")
+    print("    LightField software.")
+    print("  The slit is centered on the BFP image")
+    print("  The Coherent Wavelength is close to the tuning range.")
+    print("  The slit is engaged.")
+    print("  The blazed grating is engaged.")
+    print("=" * 60)
+    input("\nPress Enter to start the sweep...")
+    print()
+
+    # ------------------------------------------------------------------
+    # 0a. Verify PM100D is connected and functional
+    # ------------------------------------------------------------------
+    print("Checking PM100D connection...")
+    try:
+        _rm, _instr = pm100d.open_meter()
+        _p = pm100d.get_power(_instr)
+        if _p is None:
+            raise RuntimeError("Test power reading returned None.")
+        print(f"PM100D functional — test reading: {_p * 1e3:.4f} mW\n")
+        pm100d.close_meter(_rm, _instr)
+    except Exception as _exc:
+        print(f"\nERROR: PM100D not connected or not responding — {_exc}")
+        print("Please check the USB connection and VISA address, then restart.")
+        sys.exit(1)
+
+    # ------------------------------------------------------------------
+    # 0b. Connect SC30 beam shutter and ensure it is closed
+    # ------------------------------------------------------------------
+    sc30_ser = sc30.open_controller()
+    sc30.close_shutter(sc30_ser)
+    print("SC30 beam shutter connected and closed.\n")
+
     # ------------------------------------------------------------------
     # 1. Start LightField in background
     # ------------------------------------------------------------------
@@ -615,6 +645,7 @@ if __name__ == "__main__":
                 experiment, int_time_s, folder_path,
                 wavelengths_nm=wavelengths,
                 target_mw=target_mw,
+                sc30_ser=sc30_ser,
                 tolerance_mw=tolerance,
                 angle_min=angle_min,
                 angle_max=angle_max,
@@ -630,17 +661,21 @@ if __name__ == "__main__":
 
     finally:
         try:
-            with serial.Serial(PORT, BAUD, timeout=2) as ser:
-                set_shutter(ser, False)
-                set_alignment(ser, False)
-                print("Shutter closed and alignment mode off (cleanup).")
+            sc30.close_shutter(sc30_ser)
+            sc30.close_controller(sc30_ser)
+            print("SC30 beam shutter closed and disconnected.")
         except Exception:
             pass
 
-        reset = timed_input(
-            "\nReturn GLP to 86.0 deg and HWP to 6.0 deg? (auto-yes in 5 s) [Y/n]: ",
-            timeout=5, default="y",
-        ).strip().lower()
+        try:
+            with serial.Serial(PORT, BAUD, timeout=2) as ser:
+                set_shutter(ser, False)
+                set_alignment(ser, False)
+                print("Laser shutter closed and alignment mode off (cleanup).")
+        except Exception:
+            pass
+
+        reset = input("\nReturn GLP to 86.0 deg and HWP to 6.0 deg? [Y/n]: ").strip().lower()
         if reset != "n":
             print("Returning GLP to 86.0 deg and HWP to 6.0 deg ...")
             k10cr2.set_angle(glp_stage, 86.0)
@@ -659,18 +694,22 @@ if __name__ == "__main__":
         print("All connections closed.")
 
         # Return laser to 700 nm, then Standby
-        try:
-            with serial.Serial(PORT, BAUD, timeout=2) as ser:
-                print("\nReturning laser to 700 nm...")
-                ack = set_wavelength(ser, 700)
-                print(f"  Laser response: {ack!r}")
-                print("Waiting 10 seconds for laser to stabilize...")
-                time.sleep(10)
-                ser.write(b"L=0\r")
-                ack = ser.readline().decode("ascii", errors="replace").strip()
-                print(f"Laser set to Standby (L=0): {ack!r}")
-        except Exception as exc:
-            print(f"Warning: could not return laser to standby — {exc}")
+        standby_input = input("\nReturn laser to 700 nm and activate standby mode? [Y/n]: ").strip().lower()
+        if standby_input != "n":
+            try:
+                with serial.Serial(PORT, BAUD, timeout=2) as ser:
+                    print("Returning laser to 700 nm...")
+                    ack = set_wavelength(ser, 700)
+                    print(f"  Laser response: {ack!r}")
+                    print("Waiting 10 seconds for laser to stabilize...")
+                    time.sleep(10)
+                    ser.write(b"L=0\r")
+                    ack = ser.readline().decode("ascii", errors="replace").strip()
+                    print(f"Laser set to Standby (L=0): {ack!r}")
+            except Exception as exc:
+                print(f"Warning: could not return laser to standby — {exc}")
+        else:
+            print("Laser left at current wavelength. Standby mode not activated.")
 
     # ------------------------------------------------------------------
     # 12. Print and save log
