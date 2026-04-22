@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 sweep-ple.py
-11th–14th Prompts: Merges sweep-alignment.py with lightfield-ple.py.
+11th–16th Prompts: Merges sweep-alignment.py with lightfield-ple.py.
 
 At the start:
   - Opens LightField remotely (no GUI)
@@ -71,7 +71,7 @@ from power_convergence import converge_power, TOLERANCE_MW, SETTLE_S
 # Constants
 # ---------------------------------------------------------------------------
 
-PORT           = "COM5"
+PORT           = "COM6"
 BAUD           = 19200
 TARGET_TEMP_C  = -70.0
 TEMP_TOLERANCE = 2.0   # °C
@@ -440,7 +440,7 @@ if __name__ == "__main__":
     rm, instr = pm100d.open_meter()
 
     # ------------------------------------------------------------------
-    # 7. List K10CR2s and name GLP / HWP
+    # 7. List K10CR2s and name GLP / HWP / POL
     # ------------------------------------------------------------------
     all_devs = k10cr2.print_all_kinesis_devices()
     if not all_devs:
@@ -453,31 +453,67 @@ if __name__ == "__main__":
         if str(sn).startswith(k10cr2.K10CR2_PREFIX) or "K10CR" in str(desc).upper()
     ]
 
+    print("\nNaming convention reminder:")
+    print("  GLP = Glan Calcite Polarizer (power attenuator)")
+    print("  HWP = Half-Wave Plate")
+    print("  POL = Output polarizer")
+
     if not k10cr2_devs:
         print("\nNo K10CR2 devices matched. Enter serial numbers manually.")
         glp_sn = input("GLP serial number: ").strip()
         hwp_sn = input("HWP serial number: ").strip()
+        pol_sn = input("POL serial number: ").strip()
     else:
-        print("\nAssign a name to each K10CR2 (type GLP or HWP):")
+        print("\nAssign a name to each K10CR2 (type GLP, HWP, or POL):")
         names = {}
         for sn, desc in k10cr2_devs:
             raw = input(f"  Serial {sn}  ({desc})  -> name: ").strip().upper()
             if raw:
                 names[raw] = str(sn)
 
-        if "GLP" not in names or "HWP" not in names:
-            print(f"\nBoth GLP and HWP must be named. Named so far: {names}")
+        if not all(k in names for k in ("GLP", "HWP", "POL")):
+            print(f"\nGLP, HWP, and POL must all be named. Named so far: {names}")
             pm100d.close_meter(rm, instr)
             auto.Dispose()
             sys.exit(1)
 
         glp_sn = names["GLP"]
         hwp_sn = names["HWP"]
+        pol_sn = names["POL"]
 
     print(f"\nConnecting to GLP (serial {glp_sn}) ...")
     glp_stage = k10cr2.open_stage(glp_sn)
     print(f"Connecting to HWP (serial {hwp_sn}) ...")
     hwp_stage = k10cr2.open_stage(hwp_sn)
+    print(f"Connecting to POL (serial {pol_sn}) ...")
+    pol_stage = k10cr2.open_stage(pol_sn)
+
+    # -- Home all three stages --
+    print("\nHoming all K10CR2 stages...")
+    k10cr2.home_stage(glp_stage)
+    k10cr2.home_stage(hwp_stage)
+    k10cr2.home_stage(pol_stage)
+    print("All stages homed.\n")
+
+    # -- Polarization selection --
+    print("Select output polarization:")
+    print("  [1] P-pol  (POL -> 112 deg)")
+    print("  [2] S-pol  (POL -> 22 deg)")
+    while True:
+        pol_choice = input("Enter 1 or 2: ").strip()
+        if pol_choice == "1":
+            pol_target_deg = 112.0
+            pol_label = "P-pol"
+            break
+        elif pol_choice == "2":
+            pol_target_deg = 22.0
+            pol_label = "S-pol"
+            break
+        print("  Invalid choice — enter 1 or 2.")
+
+    print(f"Moving POL to {pol_target_deg:.1f} deg ({pol_label})...")
+    k10cr2.set_angle(pol_stage, pol_target_deg)
+    print(f"  POL : {k10cr2.get_angle(pol_stage):.4f} deg\n")
 
     # ------------------------------------------------------------------
     # 8. Display current angles, prompt for starting angles
@@ -528,6 +564,7 @@ if __name__ == "__main__":
         print("No wavelengths in range. Check start/stop/step values.")
         k10cr2.close_stage(glp_stage)
         k10cr2.close_stage(hwp_stage)
+        k10cr2.close_stage(pol_stage)
         pm100d.close_meter(rm, instr)
         auto.Dispose()
         sys.exit(1)
@@ -616,6 +653,7 @@ if __name__ == "__main__":
 
         k10cr2.close_stage(glp_stage)
         k10cr2.close_stage(hwp_stage)
+        k10cr2.close_stage(pol_stage)
         pm100d.close_meter(rm, instr)
         auto.Dispose()
         print("All connections closed.")
