@@ -112,7 +112,7 @@ def set_alignment(ser, enable):
 # Alignment check
 # ---------------------------------------------------------------------------
 
-def do_alignment_check(ser):
+def do_alignment_check(ser, sc30_ser):
     print(f"\n{'*'*65}")
     print("  ALIGNMENT CHECK")
     print(f"{'*'*65}")
@@ -124,7 +124,10 @@ def do_alignment_check(ser):
     print("  Waiting 5 seconds...")
     time.sleep(5)
 
-    print("  Opening shutter...")
+    print("  Closing mechanical shutter (SC30)...")
+    sc30.close_shutter(sc30_ser)
+
+    print("  Opening laser shutter...")
     ack = set_shutter(ser, True)
     print(f"  Laser response: {ack!r}")
 
@@ -132,9 +135,8 @@ def do_alignment_check(ser):
           "Take out ND filter before clicking enter")
     input("  Press Enter to continue...")
 
-    print("  Closing shutter...")
-    ack = set_shutter(ser, False)
-    print(f"  Laser response: {ack!r}")
+    print("  Closing mechanical shutter (SC30)...")
+    sc30.close_shutter(sc30_ser)
 
     print("  Turning off alignment mode...")
     ack = set_alignment(ser, False)
@@ -204,7 +206,7 @@ def run_sweep(
     for i, wl in enumerate(wavelengths_nm):
         # -- Optional alignment check (not before the first wavelength) --
         if alignment_mode and i > 0 and i % alignment_interval == 0:
-            do_alignment_check(ser)
+            do_alignment_check(ser, sc30_ser)
 
         print(f"\n{'='*65}")
         print(f"  Wavelength: {wl} nm  |  Target: {target_mw:.3f} mW  |  [{i+1}/{len(wavelengths_nm)}]")

@@ -1,6 +1,6 @@
 # 2P-PLE Automated Sweep
 
-Automated Two-Photon Photoluminescence Excitation (2P-PLE) sweep for a ultrafast laser spectroscopy setup. The script steps the excitation laser through a wavelength range, converges the optical power to a user-defined target at each step, acquires a spectrum with a CCD detector, and logs all parameters to a CSV file.
+Automated Two-Photon Photoluminescence Excitation (2P-PLE) sweep for an ultrafast laser spectroscopy setup. The script steps a tunable Ti:Sapphire laser through a user-defined wavelength range, converges the optical power to a target value at each step using a motorized polarizer attenuator, acquires a spectrum with a CCD detector, and logs all experimental parameters to a CSV file.
 
 ---
 
@@ -8,13 +8,56 @@ Automated Two-Photon Photoluminescence Excitation (2P-PLE) sweep for a ultrafast
 
 | Device | Role | Interface |
 |---|---|---|
-| Coherent Chameleon Ultra II | Tunable Ti:Sapphire excitation laser | Serial (COM5, 19200 baud) |
-| Thorlabs PM100D | Optical power meter | USB-TMC (PyVISA) |
-| Thorlabs K10CR2 + GL10-C (GLP) | Glan-Laser Calcite Polarizer — power attenuator | USB (Kinesis) |
-| Thorlabs K10CR2 + half-wave plate (HWP) | Polarization rotation | USB (Kinesis) |
-| Princeton Instruments CCD + LightField | Spectrum acquisition | COM / LightField Automation API |
+| Coherent Chameleon Ultra II | Tunable Ti:Sapphire excitation laser | Serial (COM6, 19200 baud) |
+| Thorlabs PM100D | Optical power meter | USB-TMC (PyVISA, no NI-VISA required) |
+| Thorlabs K10CR2 + GL10-C polarizer (**GLP**) | Glan-Laser Calcite Polarizer — variable power attenuator | USB (Thorlabs Kinesis) |
+| Thorlabs K10CR2 + half-wave plate (**HWP**) | Half-wave plate — maintains polarization state | USB (Thorlabs Kinesis) |
+| Thorlabs K10CR2 + output polarizer (**POL**) | Output polarizer — selects p-pol or s-pol | USB (Thorlabs Kinesis) |
+| Thorlabs SC30 + SHBH1(T) shutter (**beam shutter**) | Mechanical beam shutter — gates light to sample | Serial (COM7, 115200 baud) |
+| Princeton Instruments CCD + LightField | Spectrum acquisition | LightField .NET Automation API |
 
-The GLP and HWP rotation mounts act together as a continuously variable power attenuator. When the GLP angle changes by Δ°, the HWP is automatically moved by Δ/2° to maintain the correct polarization state.
+### Power attenuation scheme
+
+The GLP and HWP rotation mounts work together as a continuously variable attenuator. The GLP (Glan-Laser Calcite Polarizer) transmits the component of light aligned with its optical axis; rotating it changes the fraction of the beam that passes through (following Malus's law). The HWP ensures the polarization state remains correct after the GLP: whenever the GLP moves by Δ°, the HWP is automatically moved by Δ/2°. This coupling is implemented in `k10cr2.py` and used throughout `power_convergence.py` and `sweep-ple.py`.
+
+### Beam shutter
+
+The SC30 (Thorlabs) drives a high-speed mechanical shutter (SHBH1(T)) on channel 1. It is kept **closed** during laser wavelength changes and power convergence, and is opened only during LightField spectrum acquisition. This prevents the sample from being exposed to unconverged or unstabilized power.
+
+---
+
+## File Structure
+
+```
+2p-ple-auto/
+├── sweep-ple.py          # Main experiment script — run this
+├── pm100d.py             # Thorlabs PM100D power meter driver
+├── k10cr2.py             # Thorlabs K10CR2 rotation mount driver
+├── power_convergence.py  # Bisection-based power convergence algorithm
+├── sc30.py               # Thorlabs SC30 beam shutter driver
+└── Other codes/          # Earlier single-purpose scripts kept for reference
+```
+
+All five files must be in the same directory when running `sweep-ple.py`.
+
+---
+
+## Module Descriptions
+
+### `pm100d.py`
+Driver for the Thorlabs PM100D optical power meter over USB using PyVISA (pyvisa-py backend; NI-VISA is not required). On connection it sets auto-range, configures the calibration wavelength, sets units to Watts, and applies 500-point averaging. Exposes `open_meter()`, `close_meter()`, `set_wavelength()`, `get_power()`, and `read_power_array()`. The calibration wavelength is updated at each sweep step so the meter uses the correct photodiode responsivity curve.
+
+### `k10cr2.py`
+Driver for the Thorlabs K10CR2 stepper motor rotation mount using the pylablib Kinesis backend. Handles device discovery, connection, homing, angle read-back, and absolute positioning. The K10CR2 is not in pylablib's built-in unit table, so angle conversion uses the directly derived constant `COUNTS_PER_DEG = 409600 / 3` (≈ 136533 counts per degree). The module also implements `set_glp_angle()`, which moves the GLP to a new angle and automatically shifts the HWP by half the delta in a single coupled call.
+
+### `power_convergence.py`
+Implements bisection search to converge the optical power (measured by the PM100D) to a user-specified target by adjusting the GLP angle. The algorithm first probes both ends of the search range to bracket the target power, then repeatedly bisects the angle interval, measuring power at each midpoint, until the reading is within the specified tolerance. Bisection is used rather than a fixed-step walk because Malus's law guarantees the power-vs-angle curve is monotone over any 90° window, making bisection both faster (convergent in ~10 iterations for a 14° range) and more robust. Default tolerance is 0.1 mW; default settle time after each move is 2 s.
+
+### `sc30.py`
+Driver for the Thorlabs SC30 optical beam shutter controller over a USB virtual COM port (COM7). Communicates using the SC30's serial command set: `swtrig1=1` opens the shutter and `swtrig1=0` closes it. The SC30 echoes every command before the response; the driver strips the echo and prompt characters to parse the value. Exposes `open_controller()`, `close_controller()`, `open_shutter()`, `close_shutter()`, and `get_status()`.
+
+### `sweep-ple.py`
+Main experiment script. Integrates all four modules above together with the Coherent Chameleon Ultra II laser (serial) and Princeton Instruments LightField (headless .NET Automation API) to run a full 2P-PLE sweep. See the step-by-step description below.
 
 ---
 
@@ -24,10 +67,9 @@ The GLP and HWP rotation mounts act together as a continuously variable power at
 - **pyserial** ≥ 3.5
 - **pyvisa** + **pyvisa-py** + **pyusb** (NI-VISA runtime is *not* required)
 - **pylablib** ≥ 1.4.4
-- **pythonnet** (`clr`) — for LightField .NET API
-- **Princeton Instruments LightField** installed at the default path (`C:\Program Files\Princeton Instruments\LightField`)
-
-Install dependencies into the environment:
+- **pythonnet** (`clr`) — for the LightField .NET API
+- **Princeton Instruments LightField** installed at the default path:
+  `C:\Program Files\Princeton Instruments\LightField`
 
 ```bash
 conda activate lab-controls
@@ -36,66 +78,103 @@ pip install pyserial pyvisa pyvisa-py pyusb pylablib pythonnet
 
 ---
 
-## File Structure
-
-```
-2p-ple-auto/
-├── sweep-ple.py          # Main experiment script (run this)
-├── pm100d.py             # Thorlabs PM100D power meter driver
-├── k10cr2.py             # Thorlabs K10CR2 rotation mount driver
-├── power_convergence.py  # Bisection-based power convergence algorithm
-└── Other codes/          # Earlier single-purpose scripts (reference)
-```
-
-All four files must be in the same directory.
-
----
-
 ## How to Run
 
-Launch from the `lab-controls` Anaconda environment:
+From the Anaconda `lab-controls` environment:
 
 ```bash
 C:\Users\schul\anaconda3\envs\lab-controls\python.exe sweep-ple.py
 ```
 
-Or open Spyder from Anaconda Navigator (it uses `lab-controls` automatically) and run `sweep-ple.py` from there.
+Or open **Spyder** from Anaconda Navigator (it picks up `lab-controls` automatically) and run `sweep-ple.py` from there.
 
 ---
 
 ## What the Script Does — Step by Step
 
-### Startup
-1. **LightField** is started in the background (no GUI window).
-2. An output folder named `<YYYYMMDD>_Zihad` is created in the script directory.
-3. The CCD **sensor temperature** is checked — the script warns and asks for confirmation if it has not locked at −70 °C.
-4. The user selects a **saved LightField experiment** from a numbered list. The grating moves into position (10 s wait, done once only).
-5. The **save directory** and filename settings are applied to LightField *after* the experiment is loaded (loading resets these settings).
-6. The user enters the **integration time** in seconds (kept for all wavelengths).
+### 1. Pre-run checklist
 
-### Pre-sweep setup
-7. The **PM100D** power meter is connected.
-8. All connected K10CR2 devices are listed by serial number. The user assigns each one the name **GLP** or **HWP**.
-9. Current angles of both mounts are displayed. The user optionally sets new starting angles.
-10. The user enters the **wavelength range** (start, stop, step — defaults: 1064 → 1056 nm in −4 nm steps), **target power** (mW), power **tolerance** (mW), and GLP **angle search range**.
-11. The user chooses whether to enable **alignment mode** and, if so, how many wavelength iterations to wait between alignment checks.
+The script opens with a printed checklist and waits for the user to press Enter before touching any hardware:
 
-### Sweep loop (repeated for each wavelength)
-12. *(If alignment mode is on and the interval has elapsed)* The laser enters alignment mode, the shutter opens, and the script pauses with the prompt: *"Put on ND filter on the laser path before checking focus. Take out ND filter before clicking enter."* The sweep resumes after the user presses Enter.
-13. The laser is commanded to the target wavelength. The script polls until the wavelength is confirmed (±0.5 nm) within 20 s. If no movement is detected after 5 s, the command is resent automatically.
-14. The PM100D calibration wavelength is updated. The laser stabilizes for 5 s.
-15. The shutter opens. Power stabilizes for 4 s, then the power is read.
-16. If the power is outside the tolerance, **bisection convergence** adjusts the GLP angle (with HWP tracking at half the delta) until the target power is reached.
-17. A LightField frame is acquired and saved as `PLE<wavelength>` (e.g., `PLE1064`) in the dated output folder.
-18. Wavelength, power (mW), integration time (s), GLP angle (°), HWP angle (°), and the saved file path are written to the in-memory log.
-19. The shutter closes. The loop moves to the next wavelength.
+- 900 nm short-pass dichroic beamsplitter is in position
+- 650 nm short-pass filter is in the collection path
+- CCD sensor temperature has reached −70 °C in LightField
+- Spectrometer slit is centered on the back focal plane image
+- Blazed grating is engaged
 
-### Shutdown
-20. The shutter is closed and alignment mode is turned off (failsafe).
-21. The user is prompted to return GLP → 86.0° and HWP → 6.0°. If there is no response within 5 s, the reset happens automatically.
-22. All hardware connections (stages, power meter, LightField) are closed.
-23. The laser returns to 700 nm, waits 10 s, then enters **Standby** (`L=0`).
-24. The sweep log is printed to the console and saved as `sweep_ple_<timestamp>.csv` in the output folder.
+### 2. Hardware initialization
+
+1. **PM100D pre-check** — opens and reads the power meter to confirm it is connected and responding. Exits with an error message if it is not.
+2. **SC30 beam shutter** — connected and immediately closed. The beam shutter remains closed for the rest of startup and throughout wavelength changes and convergence; it only opens during spectrum acquisition.
+3. **LightField** — started in background mode (no GUI window) using the .NET Automation API.
+4. **Output folder** — a folder named `<YYYYMMDD>_Zihad` is created in the script directory. All spectra and the log CSV are saved here.
+5. **CCD sensor temperature** — read from LightField. If the sensor has not locked at −70 °C (within ±2 °C), a warning is printed and the user is asked whether to continue.
+6. **LightField experiment** — the user selects a saved experiment from a numbered list. After loading, the grating moves into position (10 s wait, done once). The save directory and base filename are applied to LightField *after* loading, because loading an experiment resets all file settings to what was saved inside it.
+7. **Integration time** — the user enters the CCD exposure time in seconds. This value is set in LightField and kept for all wavelengths.
+8. **PM100D** — reopened for the sweep.
+9. **K10CR2 rotation mounts** — all connected Kinesis devices are listed. The user assigns each K10CR2 one of three names: **GLP**, **HWP**, or **POL**. All three stages are then homed (returned to hardware zero) one by one.
+10. **Output polarization** — the user selects p-pol or s-pol. The POL stage moves to 112° for p-pol or 22° for s-pol and stays there for the entire sweep.
+11. **Starting angles** — current GLP and HWP angles are shown. The user can optionally override them before the sweep begins.
+
+### 3. Sweep parameters
+
+The user enters:
+
+| Parameter | Default |
+|---|---|
+| Start wavelength (nm) | 1064 |
+| Stop wavelength (nm, inclusive) | 1056 |
+| Step size (nm, negative = sweep down) | −4 |
+| Target power (mW) | — |
+| Power tolerance (mW) | 0.1 |
+| GLP angle_min (°) | 86.0 |
+| GLP angle_max (°) | 100.0 |
+| Enable alignment mode? | No |
+
+### 4. Sweep loop (repeated for each wavelength)
+
+**a. Optional alignment check**
+
+If alignment mode is enabled and the configured interval has elapsed (not before the first wavelength), the script pauses for a focus check:
+
+1. Alignment mode is turned on (`ALIGN=1`) — the Chameleon reduces its output power to a safe level.
+2. The SC30 mechanical beam shutter is closed.
+3. The laser shutter is opened (`S=1`) so the reduced-power beam exits the laser head.
+4. The console prints: *"Put on ND filter on the laser path before checking focus. Take out ND filter before clicking enter."* The script waits for the user to press Enter.
+5. After Enter: the SC30 mechanical beam shutter is closed again (ensuring no exposure during the transition), alignment mode is turned off (`ALIGN=0`), and the script waits 5 s before continuing.
+
+**b. Wavelength change**
+
+The laser is commanded to the target wavelength (`VW= <nm>`). The script polls the laser every second for up to 20 s until the reported wavelength is within ±0.5 nm of the target. If no movement is detected after 5 s, the set command is resent automatically (guards against the first serial command after port open being silently dropped by the Chameleon).
+
+**c. Power convergence**
+
+1. The PM100D calibration wavelength is updated to the current excitation wavelength.
+2. The laser stabilizes for 5 s.
+3. The laser shutter is opened (`S=1`).
+4. Power is read after a 4 s stabilization wait.
+5. If the reading is outside the tolerance, `converge_power()` is called:
+   - The GLP angle is swept to `angle_min`, then to `angle_max`, to bracket the target power.
+   - Bisection then narrows the GLP angle until the measured power is within tolerance. The HWP tracks at half the GLP delta on every move.
+6. The final GLP and HWP angles and the converged power reading are printed and added to the log.
+
+**d. Spectrum acquisition**
+
+1. The SC30 mechanical beam shutter is opened.
+2. LightField acquires one frame with the filename `PLE<wavelength>` (e.g., `PLE1064`) saved to the dated output folder.
+3. The script waits for LightField to signal completion.
+4. The SC30 mechanical beam shutter is closed.
+5. The laser shutter is closed (`S=0`).
+
+### 5. Shutdown
+
+After the last wavelength (or on Ctrl+C / serial error):
+
+1. **Failsafe cleanup** — SC30 closed, SC30 controller disconnected, laser shutter closed, alignment mode turned off.
+2. **Stage reset** — the user is asked whether to return GLP → 86.0° and HWP → 6.0°.
+3. **All connections closed** — K10CR2 stages, PM100D, LightField (`auto.Dispose()`).
+4. **Laser standby** — the user is asked whether to return the laser to 700 nm and activate standby mode (`L=0`). If yes: the wavelength is set to 700 nm, the script waits 10 s for the laser to stabilize, then sends the standby command.
+5. **Log saved** — the sweep table is printed to the console and saved as `sweep_ple_<timestamp>.csv` in the output folder.
 
 ---
 
@@ -109,22 +188,22 @@ Each run produces a folder `<YYYYMMDD>_Zihad/` containing:
 | Column | Description |
 |---|---|
 | `wavelength_nm` | Excitation wavelength (nm) |
-| `power_mw` | Optical power at sample (mW) |
+| `power_mw` | Optical power at acquisition (mW) |
 | `integration_time_s` | CCD integration time (s) |
 | `glp_deg` | Final GLP angle (°) |
 | `hwp_deg` | Final HWP angle (°) |
-| `lf_file` | Path to the saved LightField file |
+| `lf_file` | Path to the saved LightField spectrum file |
 
 ---
 
-## Key Parameters (editable at the top of each file)
+## Key Parameters
 
 | Parameter | File | Default | Description |
 |---|---|---|---|
-| `PORT` | `sweep-ple.py` | `COM5` | Laser serial port |
+| `PORT` | `sweep-ple.py` | `COM6` | Laser serial port |
 | `BAUD` | `sweep-ple.py` | `19200` | Serial baud rate |
-| `TARGET_TEMP_C` | `sweep-ple.py` | `-70.0` | Expected CCD temperature (°C) |
+| `TARGET_TEMP_C` | `sweep-ple.py` | `−70.0` | Expected CCD temperature (°C) |
+| `COM_PORT` | `sc30.py` | `COM7` | SC30 beam shutter serial port |
 | `TOLERANCE_MW` | `power_convergence.py` | `0.1` | Power convergence tolerance (mW) |
-| `SETTLE_S` | `power_convergence.py` | `2.0` | Settle time after each angle move (s) |
-
----
+| `SETTLE_S` | `power_convergence.py` | `2.0` | Settle time after each GLP move (s) |
+| `VISA_ADDRESS` | `pm100d.py` | `USB0::0x1313::0x8078::P0007396::INSTR` | PM100D VISA address |
